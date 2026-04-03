@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FaceSketch · CycleGAN</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet" />
+  <style>
+    /* ── Design tokens ────────────────────────────────────────────── */
+    :root {
+      --ink:       #0d0d0e;
+      --paper:     #f5f0e8;
+      --paper-2:   #ede6d6;
+      --sepia:     #c4a882;
+      --sepia-dk:  #7a5c3a;
+      --charcoal:  #2b2420;
+      --line:      #d6ccbc;
+      --red:       #c94444;
+      --green:     #3e7d5c;
+      --shadow:    0 2px 24px rgba(30,18,8,.12);
+      --r:         8px;
+    }
+
+    /* ── Reset & base ─────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'DM Mono', monospace;
+      background: var(--paper);
+      color: var(--ink);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Subtle grain overlay ─────────────────────────────────────── */
+    body::before {
+      content: '';
+      position: fixed; inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── Header ───────────────────────────────────────────────────── */
+    header {
+      position: relative; z-index: 1;
+      border-bottom: 1px solid var(--line);
+      padding: 1.5rem 2.5rem;
+      display: flex;
+      align-items: baseline;
+      gap: 1rem;
+      background: rgba(245,240,232,.9);
+      backdrop-filter: blur(8px);
+    }
+
+    header h1 {
+      font-family: 'DM Serif Display', serif;
+      font-size: 1.7rem;
+      letter-spacing: -.02em;
+      color: var(--charcoal);
+    }
+
+    header h1 em { font-style: italic; color: var(--sepia-dk); }
+
+    header p {
+      font-size: .72rem;
+      color: var(--sepia-dk);
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    .status-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: {% if models_ready %}var(--green){% else %}var(--red){% endif %};
+      box-shadow: 0 0 0 3px {% if models_ready %}rgba(62,125,92,.2){% else %}rgba(201,68,68,.2){% endif %};
+      margin-left: auto;
+      flex-shrink: 0;
+      animation: pulse 2.5s infinite;
+    }
+    @keyframes pulse {
+      0%,100% { opacity: 1; }
+      50%      { opacity: .4; }
+    }
+
+    /* ── Main layout ──────────────────────────────────────────────── */
+    main {
+      position: relative; z-index: 1;
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: auto 1fr;
+      gap: 0;
+      padding: 2rem 2.5rem;
+      max-width: 1180px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    /* ── Tab bar ──────────────────────────────────────────────────── */
+    .tab-bar {
+      grid-column: 1 / -1;
+      display: flex;
+      gap: .25rem;
+      margin-bottom: 1.5rem;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 0;
+    }
+
+    .tab {
+      font-family: 'DM Mono', monospace;
+      font-size: .72rem;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      padding: .55rem 1.2rem;
+      cursor: pointer;
+      border: none;
+      background: transparent;
+      color: var(--sepia-dk);
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      transition: all .2s;
+    }
+    .tab:hover { color: var(--ink); }
+    .tab.active {
+      color: var(--charcoal);
+      border-bottom-color: var(--sepia-dk);
+      font-weight: 500;
+    }
+
+    /* ── Panels ───────────────────────────────────────────────────── */
+    .panel { grid-column: 1 / -1; }
+
+    /* ── Upload panel ─────────────────────────────────────────────── */
+    .upload-grid {
+      display: grid;
+      grid-template-columns: 1fr 48px 1fr;
+      gap: 1.5rem;
+      align-items: start;
+    }
+
+    .card {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: var(--r);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .card-header {
+      padding: .75rem 1.25rem;
+      border-bottom: 1px solid var(--line);
+      font-size: .68rem;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--sepia-dk);
+      background: var(--paper-2);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .card-body { padding: 1.25rem; }
+
+    /* Drop zone */
+    .drop-zone {
+      border: 1.5px dashed var(--sepia);
+      border-radius: calc(var(--r) - 2px);
+      min-height: 280px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all .2s;
+      background: var(--paper);
+      position: relative;
+      overflow: hidden;
+    }
+    .drop-zone:hover, .drop-zone.drag-over {
+      border-color: var(--sepia-dk);
+      background: var(--paper-2);
+    }
+
+    .drop-zone img {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      border-radius: inherit;
+    }
+
+    .drop-icon {
+      font-size: 2.5rem;
+      margin-bottom: .75rem;
+      opacity: .4;
+    }
+
+    .drop-hint {
+      font-size: .7rem;
+      color: var(--sepia-dk);
+      text-align: center;
+      line-height: 1.6;
+    }
+
+    #fileInput { display: none; }
+
+    /* Arrow divider */
+    .arrow-col {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding-top: 3rem;
+    }
+    .arrow-svg { opacity: .35; }
+
+    /* Output card */
+    .output-preview {
+      min-height: 280px;
+      border-radius: calc(var(--r) - 2px);
+      background: var(--paper);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .output-preview img {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      object-fit: contain;
+    }
+
+    .placeholder-text {
+      font-size: .7rem;
+      color: var(--sepia);
+      text-align: center;
+      line-height: 1.8;
+    }
+
+    /* Direction badge */
+    .dir-badge {
+      font-size: .65rem;
+      letter-spacing: .06em;
+      padding: .2rem .6rem;
+      border-radius: 99px;
+      background: var(--paper-2);
+      color: var(--sepia-dk);
+      border: 1px solid var(--line);
+    }
+
+    /* Action row */
+    .action-row {
+      display: flex;
+      gap: .75rem;
+      margin-top: 1.25rem;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      font-family: 'DM Mono', monospace;
+      font-size: .72rem;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      padding: .6rem 1.4rem;
+      border-radius: var(--r);
+      cursor: pointer;
+      border: 1.5px solid transparent;
+      transition: all .18s;
+    }
+    .btn-primary {
+      background: var(--charcoal);
+      color: var(--paper);
+      border-color: var(--charcoal);
+    }
+    .btn-primary:hover:not(:disabled) {
+      background: var(--sepia-dk);
+      border-color: var(--sepia-dk);
+    }
+    .btn-ghost {
+      background: transparent;
+      color: var(--charcoal);
+      border-color: var(--line);
+    }
+    .btn-ghost:hover { border-color: var(--sepia-dk); }
+
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+
+    .select-dir {
+      font-family: 'DM Mono', monospace;
+      font-size: .72rem;
+      padding: .6rem 1rem;
+      border-radius: var(--r);
+      border: 1.5px solid var(--line);
+      background: var(--paper);
+      color: var(--ink);
+      cursor: pointer;
+    }
+
+    /* Spinner */
+    .spinner {
+      display: none;
+      width: 18px; height: 18px;
+      border: 2px solid var(--line);
+      border-top-color: var(--sepia-dk);
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Camera panel ─────────────────────────────────────────────── */
+    .camera-grid {
+      display: grid;
+      grid-template-columns: 1fr 48px 1fr;
+      gap: 1.5rem;
+      align-items: start;
+    }
+
+    #videoEl {
+      width: 100%;
+      border-radius: calc(var(--r) - 2px);
+      background: var(--ink);
+      display: block;
+    }
+
+    .cam-output {
+      min-height: 240px;
+      border-radius: calc(var(--r) - 2px);
+      background: var(--paper);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .cam-output img {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      object-fit: contain;
+    }
+
+    #canvas { display: none; }
+
+    /* ── Status bar ───────────────────────────────────────────────── */
+    .status-bar {
+      grid-column: 1 / -1;
+      margin-top: 1.5rem;
+      font-size: .68rem;
+      color: var(--sepia-dk);
+      letter-spacing: .04em;
+      min-height: 1.2rem;
+      text-align: center;
+    }
+    .status-bar.err { color: var(--red); }
+    .status-bar.ok  { color: var(--green); }
+
+    /* ── Download link ─────────────────────────────────────────────── */
+    #downloadLink {
+      display: none;
+      font-size: .7rem;
+      color: var(--sepia-dk);
+      text-decoration: underline;
+      cursor: pointer;
+      letter-spacing: .04em;
+    }
+
+    /* ── Responsive ───────────────────────────────────────────────── */
+    @media (max-width: 760px) {
+      main { padding: 1rem; }
+      .upload-grid, .camera-grid {
+        grid-template-columns: 1fr;
+      }
+      .arrow-col { padding-top: 0; transform: rotate(90deg); }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────────────────── -->
+<header>
+  <h1>Face<em>Sketch</em></h1>
+  <p>CycleGAN · Unpaired Translation</p>
+  <span class="status-dot" title="{% if models_ready %}Models ready{% else %}Models not loaded{% endif %}"></span>
+</header>
+
+<!-- ── Main ────────────────────────────────────────────────────────── -->
+<main>
+
+  <!-- Tab bar -->
+  <nav class="tab-bar">
+    <button class="tab active" data-panel="upload">Upload Image</button>
+    <button class="tab" data-panel="camera">Live Camera</button>
+  </nav>
+
+  <!-- ── Upload Panel ──────────────────────────────────────────────── -->
+  <section class="panel" id="panel-upload">
+    <div class="upload-grid">
+
+      <!-- Input card -->
+      <div class="card">
+        <div class="card-header">
+          <span>Input</span>
+          <span class="dir-badge" id="detectedLabel">auto-detect</span>
+        </div>
+        <div class="card-body">
+          <div class="drop-zone" id="dropZone" role="button" tabindex="0"
+               aria-label="Click or drag an image here">
+            <span class="drop-icon">⬚</span>
+            <p class="drop-hint">Drop an image here<br>or click to browse</p>
+          </div>
+          <input type="file" id="fileInput" accept="image/*" />
+        </div>
+      </div>
+
+      <!-- Arrow -->
+      <div class="arrow-col">
+        <svg class="arrow-svg" width="24" height="24" viewBox="0 0 24 24"
+             fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M5 12h14M13 6l6 6-6 6"/>
+        </svg>
+      </div>
+
+      <!-- Output card -->
+      <div class="card">
+        <div class="card-header">
+          <span>Output</span>
+          <span class="dir-badge" id="dirLabel">—</span>
+        </div>
+        <div class="card-body">
+          <div class="output-preview" id="outputPreview">
+            <p class="placeholder-text">Translated image<br>will appear here</p>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /upload-grid -->
+
+    <!-- Action row -->
+    <div class="action-row">
+      <select class="select-dir" id="dirSelect">
+        <option value="auto">Auto-detect direction</option>
+        <option value="face2sketch">Face → Sketch</option>
+        <option value="sketch2face">Sketch → Face</option>
+      </select>
+      <button class="btn btn-primary" id="translateBtn" disabled>
+        Translate
+      </button>
+      <div class="spinner" id="spinner"></div>
+      <button class="btn btn-ghost" id="clearBtn">Clear</button>
+      <a id="downloadLink" download="translated.png">Download</a>
+    </div>
+
+    <p class="status-bar" id="statusBar">
+      {% if not models_ready %}
+        ⚠ No model checkpoint found. Train the model and restart the server.
+      {% else %}
+        Ready – upload an image to translate.
+      {% endif %}
+    </p>
+  </section>
+
+  <!-- ── Camera Panel ──────────────────────────────────────────────── -->
+  <section class="panel" id="panel-camera" style="display:none">
+    <div class="camera-grid">
+
+      <!-- Video card -->
+      <div class="card">
+        <div class="card-header">
+          <span>Camera</span>
+          <span class="dir-badge" id="camDetectedLabel">auto-detect</span>
+        </div>
+        <div class="card-body">
+          <video id="videoEl" autoplay playsinline muted></video>
+          <canvas id="canvas"></canvas>
+          <div class="action-row" style="margin-top:.75rem">
+            <button class="btn btn-primary" id="startCamBtn">Start Camera</button>
+            <button class="btn btn-ghost" id="snapBtn" disabled>Capture & Translate</button>
+            <div class="spinner" id="camSpinner"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Arrow -->
+      <div class="arrow-col">
+        <svg class="arrow-svg" width="24" height="24" viewBox="0 0 24 24"
+             fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M5 12h14M13 6l6 6-6 6"/>
+        </svg>
+      </div>
+
+      <!-- Output card -->
+      <div class="card">
+        <div class="card-header">
+          <span>Output</span>
+          <span class="dir-badge" id="camDirLabel">—</span>
+        </div>
+        <div class="card-body">
+          <div class="cam-output" id="camOutput">
+            <p class="placeholder-text">Capture a frame to<br>see the translation</p>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /camera-grid -->
+
+    <p class="status-bar" id="camStatusBar">
+      Click "Start Camera" to begin live capture.
+    </p>
+  </section>
+
+</main>
+
+<script>
+/* ── Tabs ───────────────────────────────────────────────────────────── */
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    document.querySelectorAll('.panel').forEach(p => p.style.display = 'none');
+    document.getElementById('panel-' + tab.dataset.panel).style.display = 'block';
+  });
+});
+
+/* ── Upload / Drag-and-drop ─────────────────────────────────────────── */
+const dropZone    = document.getElementById('dropZone');
+const fileInput   = document.getElementById('fileInput');
+const translateBtn= document.getElementById('translateBtn');
+const clearBtn    = document.getElementById('clearBtn');
+const dirSelect   = document.getElementById('dirSelect');
+const spinner     = document.getElementById('spinner');
+const statusBar   = document.getElementById('statusBar');
+const outputPreview = document.getElementById('outputPreview');
+const dirLabel    = document.getElementById('dirLabel');
+const detectedLabel = document.getElementById('detectedLabel');
+const downloadLink= document.getElementById('downloadLink');
+
+let selectedFile = null;
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('keydown', e => e.key === 'Enter' && fileInput.click());
+
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (file && file.type.startsWith('image/')) loadFile(file);
+});
+
+fileInput.addEventListener('change', () => {
+  if (fileInput.files[0]) loadFile(fileInput.files[0]);
+});
+
+function loadFile(file) {
+  selectedFile = file;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    // Show preview in drop zone
+    dropZone.innerHTML = `<img src="${ev.target.result}" alt="preview" />`;
+    translateBtn.disabled = false;
+    setStatus('Image loaded – click Translate.', '');
+    detectedLabel.textContent = 'auto-detect';
+  };
+  reader.readAsDataURL(file);
+}
+
+clearBtn.addEventListener('click', () => {
+  selectedFile = null;
+  fileInput.value = '';
+  dropZone.innerHTML = `
+    <span class="drop-icon">⬚</span>
+    <p class="drop-hint">Drop an image here<br>or click to browse</p>`;
+  outputPreview.innerHTML = `<p class="placeholder-text">Translated image<br>will appear here</p>`;
+  dirLabel.textContent = '—';
+  detectedLabel.textContent = 'auto-detect';
+  downloadLink.style.display = 'none';
+  translateBtn.disabled = true;
+  setStatus('Cleared.', '');
+});
+
+translateBtn.addEventListener('click', async () => {
+  if (!selectedFile) return;
+
+  translateBtn.disabled = true;
+  spinner.style.display = 'block';
+  setStatus('Translating…', '');
+
+  const formData = new FormData();
+  formData.append('file', selectedFile);
+  formData.append('direction', dirSelect.value);
+
+  try {
+    const res = await fetch('/translate', { method: 'POST', body: formData });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || res.statusText);
+    }
+
+    const direction = res.headers.get('X-Translation-Direction') || dirSelect.value;
+    const blob = await res.blob();
+    const url  = URL.createObjectURL(blob);
+
+    outputPreview.innerHTML = `<img src="${url}" alt="translated" />`;
+    dirLabel.textContent = direction;
+    detectedLabel.textContent = direction.split('→')[0].trim();
+
+    downloadLink.href = url;
+    downloadLink.style.display = 'inline';
+
+    setStatus(`Done! Direction: ${direction}`, 'ok');
+  } catch (err) {
+    setStatus('Error: ' + err.message, 'err');
+  } finally {
+    translateBtn.disabled = false;
+    spinner.style.display = 'none';
+  }
+});
+
+function setStatus(msg, cls) {
+  statusBar.textContent = msg;
+  statusBar.className = 'status-bar' + (cls ? ' ' + cls : '');
+}
+
+/* ── Camera ─────────────────────────────────────────────────────────── */
+const videoEl    = document.getElementById('videoEl');
+const canvas     = document.getElementById('canvas');
+const startCamBtn= document.getElementById('startCamBtn');
+const snapBtn    = document.getElementById('snapBtn');
+const camSpinner = document.getElementById('camSpinner');
+const camOutput  = document.getElementById('camOutput');
+const camDirLabel    = document.getElementById('camDirLabel');
+const camDetectedLabel = document.getElementById('camDetectedLabel');
+const camStatusBar   = document.getElementById('camStatusBar');
+
+let stream = null;
+
+startCamBtn.addEventListener('click', async () => {
+  if (stream) {
+    // Stop camera
+    stream.getTracks().forEach(t => t.stop());
+    videoEl.srcObject = null;
+    stream = null;
+    startCamBtn.textContent = 'Start Camera';
+    snapBtn.disabled = true;
+    camStatusBar.textContent = 'Camera stopped.';
+    return;
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    videoEl.srcObject = stream;
+    startCamBtn.textContent = 'Stop Camera';
+    snapBtn.disabled = false;
+    camStatusBar.textContent = 'Live – click "Capture & Translate".';
+  } catch (e) {
+    camStatusBar.textContent = 'Camera access denied or unavailable.';
+    camStatusBar.className = 'status-bar err';
+  }
+});
+
+snapBtn.addEventListener('click', async () => {
+  if (!stream) return;
+
+  // Draw frame to canvas
+  canvas.width  = videoEl.videoWidth  || 640;
+  canvas.height = videoEl.videoHeight || 480;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(videoEl, 0, 0);
+
+  const b64 = canvas.toDataURL('image/jpeg', 0.85);
+
+  snapBtn.disabled = true;
+  camSpinner.style.display = 'block';
+  camStatusBar.textContent = 'Translating…';
+  camStatusBar.className = 'status-bar';
+
+  try {
+    const res = await fetch('/translate_base64', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: b64, direction: 'auto' }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+
+    camOutput.innerHTML = `<img src="${data.image}" alt="translated" />`;
+    camDirLabel.textContent = data.direction;
+    camDetectedLabel.textContent = data.detected_domain;
+    camStatusBar.textContent = `Done! Detected: ${data.detected_domain} → ${data.direction}`;
+    camStatusBar.className = 'status-bar ok';
+  } catch (err) {
+    camStatusBar.textContent = 'Error: ' + err.message;
+    camStatusBar.className = 'status-bar err';
+  } finally {
+    snapBtn.disabled = false;
+    camSpinner.style.display = 'none';
+  }
+});
+</script>
+</body>
+</html>
