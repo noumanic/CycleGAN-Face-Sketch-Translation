@@ -5,3 +5,11 @@ facesketch-venv/
 data/
 dataset/
 
+__pycache__/
+*.pyc
+
+checkpoints/
+*.pth
+
+samples/
+.ipynb_checkpoints/
